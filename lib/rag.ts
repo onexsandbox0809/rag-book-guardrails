@@ -43,7 +43,8 @@ export async function answerQuestion(
     return {
       answer:
         "Please select a book before asking a question.",
-      sources: [],
+      source1: null,
+      source2: null,
       refused: true,
       reason: "NO_DOCUMENT_SELECTED",
     };
@@ -53,7 +54,8 @@ export async function answerQuestion(
     return {
       answer:
         "Please enter a question.",
-      sources: [],
+      source1: null,
+      source2: null,
       refused: true,
       reason: "EMPTY_QUESTION",
     };
@@ -78,7 +80,8 @@ export async function answerQuestion(
     return {
       answer:
         "The selected book could not be found.",
-      sources: [],
+      source1: null,
+      source2: null,
       refused: true,
       reason: "DOCUMENT_NOT_FOUND",
     };
@@ -87,7 +90,8 @@ export async function answerQuestion(
   if (document.status !== "ready") {
     return {
       answer: `The selected book is not ready yet. Current status: ${document.status}.`,
-      sources: [],
+      source1: null,
+      source2: null,
       refused: true,
       reason: "DOCUMENT_NOT_READY",
     };
@@ -246,11 +250,11 @@ export async function answerQuestion(
   );
 
   // ---------------------------------------------------------
-  // 7. Select top evidence
+  // 7. Select TOP 2 evidence only
   // ---------------------------------------------------------
 
   const selectedMatches =
-    ranked.slice(0, 8);
+    ranked.slice(0, 2);
 
   // ---------------------------------------------------------
   // 8. Debug information
@@ -267,7 +271,7 @@ export async function answerQuestion(
       keywordMatches.length,
 
     rankedResults:
-      ranked.slice(0, 8).map(
+      ranked.slice(0, 2).map(
         (r) => ({
           id: r.id,
           page: r.page_number,
@@ -310,7 +314,8 @@ export async function answerQuestion(
   if (!selectedMatches.length) {
     return {
       answer: `I can only answer questions based on "${bookTitle}". I couldn't find sufficient information about this topic in the book.`,
-      sources: [],
+      source1: null,
+      source2: null,
       refused: true,
       reason:
         "INSUFFICIENT_BOOK_EVIDENCE",
@@ -432,40 +437,89 @@ For definition questions:
   const answer =
     completion.choices[0]
       ?.message?.content ||
-    `I can only answer questions based on "${bookTitle}". I couldn't find sufficient information about this topic in the book.`;
+    `I can only answer questions based on "${bookTitle}". I couldn't find sufficient information about this topic.`;
 
   // ---------------------------------------------------------
-  // 13. Build sources
+  // 13. Build SOURCE 1
   // ---------------------------------------------------------
 
-  const sources: Source[] =
-    selectedMatches.map(
-      (r) => ({
-        page:
-          r.page_number,
-        chapter:
-          r.chapter,
-        section:
-          r.section,
-        similarity:
-          Number(
-            r.vectorSimilarity ||
-              r.finalScore ||
-              0
-          ),
-        chunkId: r.id,
-      })
-    );
+  const source1: Source | null =
+    selectedMatches.length > 0
+      ? {
+          page:
+            selectedMatches[0]
+              .page_number,
+
+          chapter:
+            selectedMatches[0]
+              .chapter,
+
+          section:
+            selectedMatches[0]
+              .section,
+
+          similarity:
+            Number(
+              selectedMatches[0]
+                .vectorSimilarity ||
+                selectedMatches[0]
+                  .finalScore ||
+                0
+            ),
+
+          chunkId:
+            selectedMatches[0].id,
+        }
+      : null;
 
   // ---------------------------------------------------------
-  // 14. Return answer
+  // 14. Build SOURCE 2
+  // ---------------------------------------------------------
+
+  const source2: Source | null =
+    selectedMatches.length > 1
+      ? {
+          page:
+            selectedMatches[1]
+              .page_number,
+
+          chapter:
+            selectedMatches[1]
+              .chapter,
+
+          section:
+            selectedMatches[1]
+              .section,
+
+          similarity:
+            Number(
+              selectedMatches[1]
+                .vectorSimilarity ||
+                selectedMatches[1]
+                  .finalScore ||
+                0
+            ),
+
+          chunkId:
+            selectedMatches[1].id,
+        }
+      : null;
+
+  // ---------------------------------------------------------
+  // 15. Return answer
   // ---------------------------------------------------------
 
   return {
     answer,
-    sources,
+
+    source1,
+
+    source2,
+
     refused: false,
+
     reason: null,
+
     debug,
   };
 }
