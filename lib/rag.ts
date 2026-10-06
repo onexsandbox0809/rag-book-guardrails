@@ -267,8 +267,6 @@ ${r.content}`
       model:
         process.env.CHAT_MODEL || "gpt-5-mini",
 
-      temperature: 0,
-
       messages: [
         {
           role: "system",
