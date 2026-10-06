@@ -204,14 +204,33 @@ console.log("================================");
   // Do NOT reject merely because vector similarity is < 0.75
   // ---------------------------------------------------------
 
-  if (!selectedMatches.length) {
-    return {
-      answer: `I can only answer questions based on "${bookTitle}". I couldn't find sufficient information about this topic in the book.`,
-      sources: [],
-      refused: true,
-      reason: "INSUFFICIENT_BOOK_EVIDENCE",
-    };
-  }
+if (!selectedMatches.length) {
+  return {
+    answer: `I can only answer questions based on "${bookTitle}". I couldn't find sufficient information about this topic in the book.`,
+
+    sources: [],
+
+    refused: true,
+
+    reason: "INSUFFICIENT_BOOK_EVIDENCE",
+
+    debug: {
+      question,
+      documentId,
+      vectorResults: vectorMatches?.length || 0,
+      keywordResults: keywordMatches?.length || 0,
+
+      rankedResults: ranked.slice(0, 8).map((r) => ({
+        id: r.id,
+        page: r.page_number,
+        vectorSimilarity: r.vectorSimilarity,
+        keywordScore: r.keywordScore,
+        finalScore: r.finalScore,
+        contentPreview: String(r.content || "").substring(0, 300),
+      })),
+    },
+  };
+}
 
   // ---------------------------------------------------------
   // 8. Build context
@@ -324,9 +343,24 @@ Include the relevant page reference.`,
     }));
 
   return {
-    answer,
-    sources,
-    refused: false,
-    reason: null,
-  };
-}
+  answer,
+  sources,
+  refused: false,
+  reason: null,
+
+  debug: {
+    question,
+    documentId,
+    vectorResults: vectorMatches?.length || 0,
+    keywordResults: keywordMatches?.length || 0,
+
+    rankedResults: ranked.slice(0, 8).map((r) => ({
+      id: r.id,
+      page: r.page_number,
+      vectorSimilarity: r.vectorSimilarity,
+      keywordScore: r.keywordScore,
+      finalScore: r.finalScore,
+      contentPreview: String(r.content || "").substring(0, 300),
+    })),
+  },
+};
