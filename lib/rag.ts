@@ -27,6 +27,10 @@ export async function answerQuestion(
   const supabase = getSupabaseAdmin();
   const openai = getOpenAI();
 
+  // ---------------------------------------------------------
+  // 0. Validate document
+  // ---------------------------------------------------------
+
   if (!documentId) {
     return {
       answer: "Please select a book before asking a question.",
@@ -76,12 +80,14 @@ export async function answerQuestion(
   // 3. VECTOR SEARCH
   // ---------------------------------------------------------
 
-  const { data: vectorMatches, error: vectorError } =
-    await supabase.rpc("match_document_chunks", {
-      query_embedding: queryEmbedding,
-      match_count: 12,
-      filter_document_id: documentId,
-    });
+  const {
+    data: vectorMatches,
+    error: vectorError,
+  } = await supabase.rpc("match_document_chunks", {
+    query_embedding: queryEmbedding,
+    match_count: 12,
+    filter_document_id: documentId,
+  });
 
   if (vectorError) {
     throw new Error(
@@ -93,12 +99,14 @@ export async function answerQuestion(
   // 4. KEYWORD SEARCH
   // ---------------------------------------------------------
 
-  const { data: keywordMatches, error: keywordError } =
-    await supabase.rpc("search_document_chunks_keyword", {
-      search_query: question,
-      match_count: 12,
-      filter_document_id: documentId,
-    });
+  const {
+    data: keywordMatches,
+    error: keywordError,
+  } = await supabase.rpc("search_document_chunks_keyword", {
+    search_query: question,
+    match_count: 12,
+    filter_document_id: documentId,
+  });
 
   if (keywordError) {
     console.error(
@@ -113,6 +121,7 @@ export async function answerQuestion(
 
   const combined = new Map<string, any>();
 
+  // Add vector results
   for (const row of vectorMatches || []) {
     combined.set(row.id, {
       ...row,
@@ -121,6 +130,7 @@ export async function answerQuestion(
     });
   }
 
+  // Add keyword results
   for (const row of keywordMatches || []) {
     const existing = combined.get(row.id);
 
@@ -143,97 +153,122 @@ export async function answerQuestion(
   // 6. SCORE RESULTS
   // ---------------------------------------------------------
 
-  const ranked = Array.from(combined.values()).map((row) => {
+  const ranked = Array.from(combined.values()).map(
+    (row) => {
+      const vectorScore = Number(
+        row.vectorSimilarity || 0
+      );
 
-    const vectorScore = Number(
-      row.vectorSimilarity || 0
-    );
+      const keywordScore = Number(
+        row.keywordScore || 0
+      );
 
-    const keywordScore = Number(
-      row.keywordScore || 0
-    );
+      /*
+        Vector similarity = 75%
+        Keyword relevance = 25%
 
-    /*
-      Vector similarity normally ranges between 0 and 1.
+        IMPORTANT:
+        This is a ranking weight.
+        It is NOT a minimum similarity threshold.
+      */
 
-      Keyword score from PostgreSQL is usually much smaller,
-      so we normalize it before combining.
-    */
+      const normalizedKeywordScore =
+        Math.min(keywordScore * 5, 1);
 
-    const normalizedKeywordScore =
-      Math.min(keywordScore * 5, 1);
+      const finalScore =
+        vectorScore * 0.75 +
+        normalizedKeywordScore * 0.25;
 
-    const finalScore =
-      vectorScore * 0.75 +
-      normalizedKeywordScore * 0.25;
+      return {
+        ...row,
+        finalScore,
+      };
+    }
+  );
 
-    return {
-      ...row,
-      finalScore,
-    };
-  });
-
+  // Highest score first
   ranked.sort(
     (a, b) => b.finalScore - a.finalScore
   );
 
-  // Take the best evidence.
+  // ---------------------------------------------------------
+  // 7. Select best evidence
+  // ---------------------------------------------------------
+
   const selectedMatches = ranked.slice(0, 8);
+
+  // ---------------------------------------------------------
+  // DEBUG LOGGING
+  // ---------------------------------------------------------
+
   console.log("========== RAG DEBUG ==========");
-console.log("Question:", question);
-console.log("Document ID:", documentId);
-console.log("Vector results:", vectorMatches?.length || 0);
-console.log("Keyword results:", keywordMatches?.length || 0);
+  console.log("Question:", question);
+  console.log("Document ID:", documentId);
+  console.log(
+    "Vector results:",
+    vectorMatches?.length || 0
+  );
+  console.log(
+    "Keyword results:",
+    keywordMatches?.length || 0
+  );
 
-console.log(
-  "Ranked results:",
-  ranked.slice(0, 8).map((r) => ({
-    id: r.id,
-    page: r.page_number,
-    vectorSimilarity: r.vectorSimilarity,
-    keywordScore: r.keywordScore,
-    finalScore: r.finalScore,
-    contentPreview: String(r.content || "").substring(0, 200),
-  }))
-);
+  console.log(
+    "Ranked results:",
+    ranked.slice(0, 8).map((r) => ({
+      id: r.id,
+      page: r.page_number,
+      vectorSimilarity: r.vectorSimilarity,
+      keywordScore: r.keywordScore,
+      finalScore: r.finalScore,
+      contentPreview: String(
+        r.content || ""
+      ).substring(0, 200),
+    }))
+  );
 
-console.log("================================");
-
-  // ---------------------------------------------------------
-  // 7. IMPORTANT:
-  // Do NOT reject merely because vector similarity is < 0.75
-  // ---------------------------------------------------------
-
-if (!selectedMatches.length) {
-  return {
-    answer: `I can only answer questions based on "${bookTitle}". I couldn't find sufficient information about this topic in the book.`,
-
-    sources: [],
-
-    refused: true,
-
-    reason: "INSUFFICIENT_BOOK_EVIDENCE",
-
-    debug: {
-      question,
-      documentId,
-      vectorResults: vectorMatches?.length || 0,
-      keywordResults: keywordMatches?.length || 0,
-
-      rankedResults: ranked.slice(0, 8).map((r) => ({
-        id: r.id,
-        page: r.page_number,
-        vectorSimilarity: r.vectorSimilarity,
-        keywordScore: r.keywordScore,
-        finalScore: r.finalScore,
-        contentPreview: String(r.content || "").substring(0, 300),
-      })),
-    },
-  };
-}
+  console.log("================================");
 
   // ---------------------------------------------------------
-  // 8. Build context
+  // 8. No evidence found
+  // ---------------------------------------------------------
+
+  if (!selectedMatches.length) {
+    return {
+      answer: `I can only answer questions based on "${bookTitle}". I couldn't find sufficient information about this topic in the book.`,
+      sources: [],
+      refused: true,
+      reason: "INSUFFICIENT_BOOK_EVIDENCE",
+
+      debug: {
+        question,
+        documentId,
+        vectorResults:
+          vectorMatches?.length || 0,
+        keywordResults:
+          keywordMatches?.length || 0,
+
+        rankedResults: ranked
+          .slice(0, 8)
+          .map((r) => ({
+            id: r.id,
+            page: r.page_number,
+            vectorSimilarity:
+              r.vectorSimilarity,
+            keywordScore:
+              r.keywordScore,
+            finalScore:
+              r.finalScore,
+            contentPreview: String(
+              r.content || ""
+            ).substring(0, 300),
+          })),
+      },
+    };
+  }
+
+  // ---------------------------------------------------------
+  // 9. Build context for OpenAI
   // ---------------------------------------------------------
 
   const context = selectedMatches
@@ -256,10 +291,12 @@ ${
 Content:
 ${r.content}`
     )
-    .join("\n\n--------------------------------\n\n");
+    .join(
+      "\n\n--------------------------------\n\n"
+    );
 
   // ---------------------------------------------------------
-  // 9. Send evidence to OpenAI
+  // 10. Send evidence to OpenAI
   // ---------------------------------------------------------
 
   const completion =
@@ -295,9 +332,10 @@ RULES:
 "I can only answer questions based on "${bookTitle}". I couldn't find sufficient information about this topic in the book."
 
 IMPORTANT:
+
 Do not refuse simply because a vector similarity score is low.
-The supplied excerpts have already been selected using both semantic
-and keyword retrieval.`,
+
+The supplied excerpts have already been selected using both semantic and keyword retrieval.`,
         },
 
         {
@@ -318,7 +356,7 @@ Include the relevant page reference.`,
     });
 
   // ---------------------------------------------------------
-  // 10. Get answer
+  // 11. Get answer
   // ---------------------------------------------------------
 
   const answer =
@@ -326,7 +364,7 @@ Include the relevant page reference.`,
     `I can only answer questions based on "${bookTitle}". I couldn't find sufficient information about this topic in the book.`;
 
   // ---------------------------------------------------------
-  // 11. Return references
+  // 12. Return references
   // ---------------------------------------------------------
 
   const sources: Source[] =
@@ -335,30 +373,48 @@ Include the relevant page reference.`,
       chapter: r.chapter,
       section: r.section,
       similarity: Number(
-        r.vectorSimilarity || r.finalScore || 0
+        r.vectorSimilarity ||
+          r.finalScore ||
+          0
       ),
       chunkId: r.id,
     }));
 
+  // ---------------------------------------------------------
+  // 13. Return answer + debug information
+  // ---------------------------------------------------------
+
   return {
-  answer,
-  sources,
-  refused: false,
-  reason: null,
+    answer,
+    sources,
+    refused: false,
+    reason: null,
 
-  debug: {
-    question,
-    documentId,
-    vectorResults: vectorMatches?.length || 0,
-    keywordResults: keywordMatches?.length || 0,
+    debug: {
+      question,
+      documentId,
 
-    rankedResults: ranked.slice(0, 8).map((r) => ({
-      id: r.id,
-      page: r.page_number,
-      vectorSimilarity: r.vectorSimilarity,
-      keywordScore: r.keywordScore,
-      finalScore: r.finalScore,
-      contentPreview: String(r.content || "").substring(0, 300),
-    })),
-  },
-};
+      vectorResults:
+        vectorMatches?.length || 0,
+
+      keywordResults:
+        keywordMatches?.length || 0,
+
+      rankedResults: ranked
+        .slice(0, 8)
+        .map((r) => ({
+          id: r.id,
+          page: r.page_number,
+          vectorSimilarity:
+            r.vectorSimilarity,
+          keywordScore:
+            r.keywordScore,
+          finalScore:
+            r.finalScore,
+          contentPreview: String(
+            r.content || ""
+          ).substring(0, 300),
+        })),
+    },
+  };
+}
