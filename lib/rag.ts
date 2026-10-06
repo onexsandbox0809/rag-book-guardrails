@@ -9,17 +9,25 @@ export type Source = {
   chunkId: string;
 };
 
+/**
+ * Create an embedding for the user's question.
+ */
 export async function embedText(text: string) {
   const openai = getOpenAI();
 
   const response = await openai.embeddings.create({
-    model: process.env.EMBEDDING_MODEL || "text-embedding-3-small",
+    model:
+      process.env.EMBEDDING_MODEL ||
+      "text-embedding-3-small",
     input: text,
   });
 
   return response.data[0].embedding;
 }
 
+/**
+ * Answer a question using only the selected book.
+ */
 export async function answerQuestion(
   question: string,
   documentId?: string | null
@@ -28,15 +36,26 @@ export async function answerQuestion(
   const openai = getOpenAI();
 
   // ---------------------------------------------------------
-  // 0. Validate document
+  // 0. Validate input
   // ---------------------------------------------------------
 
   if (!documentId) {
     return {
-      answer: "Please select a book before asking a question.",
+      answer:
+        "Please select a book before asking a question.",
       sources: [],
       refused: true,
       reason: "NO_DOCUMENT_SELECTED",
+    };
+  }
+
+  if (!question || !question.trim()) {
+    return {
+      answer:
+        "Please enter a question.",
+      sources: [],
+      refused: true,
+      reason: "EMPTY_QUESTION",
     };
   }
 
@@ -44,15 +63,21 @@ export async function answerQuestion(
   // 1. Verify selected document
   // ---------------------------------------------------------
 
-  const { data: document, error: docError } = await supabase
+  const {
+    data: document,
+    error: docError,
+  } = await supabase
     .from("documents")
-    .select("id,title,file_name,status")
+    .select(
+      "id,title,file_name,status"
+    )
     .eq("id", documentId)
     .single();
 
   if (docError || !document) {
     return {
-      answer: "The selected book could not be found.",
+      answer:
+        "The selected book could not be found.",
       sources: [],
       refused: true,
       reason: "DOCUMENT_NOT_FOUND",
@@ -68,13 +93,17 @@ export async function answerQuestion(
     };
   }
 
-  const bookTitle = document.title || document.file_name;
+  const bookTitle =
+    document.title ||
+    document.file_name ||
+    "Selected book";
 
   // ---------------------------------------------------------
-  // 2. Create query embedding
+  // 2. Create embedding for the question
   // ---------------------------------------------------------
 
-  const queryEmbedding = await embedText(question);
+  const queryEmbedding =
+    await embedText(question);
 
   // ---------------------------------------------------------
   // 3. VECTOR SEARCH
@@ -83,11 +112,14 @@ export async function answerQuestion(
   const {
     data: vectorMatches,
     error: vectorError,
-  } = await supabase.rpc("match_document_chunks", {
-    query_embedding: queryEmbedding,
-    match_count: 12,
-    filter_document_id: documentId,
-  });
+  } = await supabase.rpc(
+    "match_document_chunks",
+    {
+      query_embedding: queryEmbedding,
+      match_count: 12,
+      filter_document_id: documentId,
+    }
+  );
 
   if (vectorError) {
     throw new Error(
@@ -99,81 +131,102 @@ export async function answerQuestion(
   // 4. KEYWORD SEARCH
   // ---------------------------------------------------------
 
+  let keywordMatches: any[] = [];
+
   const {
-    data: keywordMatches,
+    data: keywordData,
     error: keywordError,
-  } = await supabase.rpc("search_document_chunks_keyword", {
-    search_query: question,
-    match_count: 12,
-    filter_document_id: documentId,
-  });
+  } = await supabase.rpc(
+    "search_document_chunks_keyword",
+    {
+      search_query: question,
+      match_count: 12,
+      filter_document_id: documentId,
+    }
+  );
 
   if (keywordError) {
     console.error(
       "Keyword search failed:",
       keywordError.message
     );
+  } else {
+    keywordMatches =
+      keywordData || [];
   }
 
   // ---------------------------------------------------------
   // 5. COMBINE VECTOR + KEYWORD RESULTS
   // ---------------------------------------------------------
 
-  const combined = new Map<string, any>();
+  const combined =
+    new Map<string, any>();
 
   // Add vector results
   for (const row of vectorMatches || []) {
     combined.set(row.id, {
       ...row,
-      vectorSimilarity: Number(row.similarity || 0),
+      vectorSimilarity: Number(
+        row.similarity || 0
+      ),
       keywordScore: 0,
     });
   }
 
   // Add keyword results
-  for (const row of keywordMatches || []) {
-    const existing = combined.get(row.id);
+  for (const row of keywordMatches) {
+    const existing =
+      combined.get(row.id);
 
     if (existing) {
-      existing.keywordScore = Number(
-        row.keyword_score || 0
-      );
+      existing.keywordScore =
+        Number(
+          row.keyword_score || 0
+        );
     } else {
       combined.set(row.id, {
         ...row,
         vectorSimilarity: 0,
-        keywordScore: Number(
-          row.keyword_score || 0
-        ),
+        keywordScore:
+          Number(
+            row.keyword_score || 0
+          ),
       });
     }
   }
 
   // ---------------------------------------------------------
-  // 6. SCORE RESULTS
+  // 6. RANK RESULTS
   // ---------------------------------------------------------
 
-  const ranked = Array.from(combined.values()).map(
-    (row) => {
-      const vectorScore = Number(
-        row.vectorSimilarity || 0
-      );
+  const ranked =
+    Array.from(
+      combined.values()
+    ).map((row) => {
+      const vectorScore =
+        Number(
+          row.vectorSimilarity || 0
+        );
 
-      const keywordScore = Number(
-        row.keywordScore || 0
-      );
+      const keywordScore =
+        Number(
+          row.keywordScore || 0
+        );
 
       /*
-        Vector similarity = 75%
-        Keyword relevance = 25%
-
-        IMPORTANT:
-        This is a ranking weight.
-        It is NOT a minimum similarity threshold.
-      */
+       * Vector relevance = 75%
+       * Keyword relevance = 25%
+       *
+       * IMPORTANT:
+       * This is only a ranking weight.
+       * It is NOT a minimum similarity threshold.
+       */
 
       const normalizedKeywordScore =
-        Math.min(keywordScore * 5, 1);
+        Math.min(
+          keywordScore * 5,
+          1
+        );
 
       const finalScore =
         vectorScore * 0.75 +
@@ -183,54 +236,75 @@ export async function answerQuestion(
         ...row,
         finalScore,
       };
-    }
-  );
+    });
 
   // Highest score first
   ranked.sort(
-    (a, b) => b.finalScore - a.finalScore
+    (a, b) =>
+      b.finalScore -
+      a.finalScore
   );
 
   // ---------------------------------------------------------
-  // 7. Select best evidence
+  // 7. Select top evidence
   // ---------------------------------------------------------
 
-  const selectedMatches = ranked.slice(0, 8);
+  const selectedMatches =
+    ranked.slice(0, 8);
 
   // ---------------------------------------------------------
-  // DEBUG LOGGING
+  // 8. Debug information
   // ---------------------------------------------------------
 
-  console.log("========== RAG DEBUG ==========");
-  console.log("Question:", question);
-  console.log("Document ID:", documentId);
+  const debug = {
+    question,
+    documentId,
+
+    vectorResults:
+      vectorMatches?.length || 0,
+
+    keywordResults:
+      keywordMatches.length,
+
+    rankedResults:
+      ranked.slice(0, 8).map(
+        (r) => ({
+          id: r.id,
+          page: r.page_number,
+          chapter: r.chapter,
+          section: r.section,
+          vectorSimilarity:
+            r.vectorSimilarity,
+          keywordScore:
+            r.keywordScore,
+          finalScore:
+            r.finalScore,
+          contentPreview:
+            String(
+              r.content || ""
+            ).substring(0, 300),
+        })
+      ),
+  };
+
   console.log(
-    "Vector results:",
-    vectorMatches?.length || 0
-  );
-  console.log(
-    "Keyword results:",
-    keywordMatches?.length || 0
+    "========== RAG DEBUG =========="
   );
 
   console.log(
-    "Ranked results:",
-    ranked.slice(0, 8).map((r) => ({
-      id: r.id,
-      page: r.page_number,
-      vectorSimilarity: r.vectorSimilarity,
-      keywordScore: r.keywordScore,
-      finalScore: r.finalScore,
-      contentPreview: String(
-        r.content || ""
-      ).substring(0, 200),
-    }))
+    JSON.stringify(
+      debug,
+      null,
+      2
+    )
   );
 
-  console.log("================================");
+  console.log(
+    "================================"
+  );
 
   // ---------------------------------------------------------
-  // 8. No evidence found
+  // 9. No evidence found
   // ---------------------------------------------------------
 
   if (!selectedMatches.length) {
@@ -238,43 +312,21 @@ export async function answerQuestion(
       answer: `I can only answer questions based on "${bookTitle}". I couldn't find sufficient information about this topic in the book.`,
       sources: [],
       refused: true,
-      reason: "INSUFFICIENT_BOOK_EVIDENCE",
-
-      debug: {
-        question,
-        documentId,
-        vectorResults:
-          vectorMatches?.length || 0,
-        keywordResults:
-          keywordMatches?.length || 0,
-
-        rankedResults: ranked
-          .slice(0, 8)
-          .map((r) => ({
-            id: r.id,
-            page: r.page_number,
-            vectorSimilarity:
-              r.vectorSimilarity,
-            keywordScore:
-              r.keywordScore,
-            finalScore:
-              r.finalScore,
-            contentPreview: String(
-              r.content || ""
-            ).substring(0, 300),
-          })),
-      },
+      reason:
+        "INSUFFICIENT_BOOK_EVIDENCE",
+      debug,
     };
   }
 
   // ---------------------------------------------------------
-  // 9. Build context for OpenAI
+  // 10. Build context
   // ---------------------------------------------------------
 
-  const context = selectedMatches
-    .map(
-      (r, i) =>
-        `[SOURCE ${i + 1}]
+  const context =
+    selectedMatches
+      .map(
+        (r, i) =>
+          `[SOURCE ${i + 1}]
 Page: ${r.page_number}
 ${
   r.chapter
@@ -285,36 +337,46 @@ ${
     ? `Section: ${r.section}\n`
     : ""
 }Vector relevance: ${Number(
-          r.vectorSimilarity || 0
-        ).toFixed(3)}
+            r.vectorSimilarity || 0
+          ).toFixed(3)}
+Keyword relevance: ${Number(
+            r.keywordScore || 0
+          ).toFixed(3)}
 
 Content:
 ${r.content}`
-    )
-    .join(
-      "\n\n--------------------------------\n\n"
-    );
+      )
+      .join(
+        "\n\n--------------------------------\n\n"
+      );
 
   // ---------------------------------------------------------
-  // 10. Send evidence to OpenAI
+  // 11. Ask OpenAI
   // ---------------------------------------------------------
 
   const completion =
-    await openai.chat.completions.create({
-      model:
-        process.env.CHAT_MODEL || "gpt-5-mini",
+    await openai.chat.completions.create(
+      {
+        model:
+          process.env.CHAT_MODEL ||
+          "gpt-5-mini",
 
-      messages: [
-        {
-          role: "system",
+        /*
+         * Do NOT add temperature: 0 here.
+         * Your selected model rejected temperature=0.
+         */
 
-          content: `You are a CLOSED-BOOK document assistant.
+        messages: [
+          {
+            role: "system",
+
+            content: `You are a CLOSED-BOOK document assistant.
 
 The selected book is:
 
 "${bookTitle}"
 
-You MUST answer using ONLY the supplied book excerpts.
+You MUST answer the user's question using ONLY the supplied excerpts from this book.
 
 RULES:
 
@@ -327,21 +389,19 @@ RULES:
 7. For calculation questions, show the calculation using the values from the book.
 8. Always mention the relevant page number.
 9. Keep the answer clear and concise.
-10. If the excerpts genuinely do not contain enough information, say:
+10. If multiple excerpts contain relevant information, combine them.
+11. If the exact wording of the question appears in the excerpts, use the corresponding answer.
+12. Do not refuse simply because the vector similarity is below any particular number.
 
-"I can only answer questions based on "${bookTitle}". I couldn't find sufficient information about this topic in the book."
+If the supplied excerpts genuinely do not contain enough information to answer the question, say:
 
-IMPORTANT:
+"I can only answer questions based on "${bookTitle}". I couldn't find sufficient information about this topic in the book."`,
+          },
 
-Do not refuse simply because a vector similarity score is low.
+          {
+            role: "user",
 
-The supplied excerpts have already been selected using both semantic and keyword retrieval.`,
-        },
-
-        {
-          role: "user",
-
-          content: `Question:
+            content: `Question:
 
 ${question}
 
@@ -349,39 +409,56 @@ BOOK EXCERPTS:
 
 ${context}
 
-Answer the question using only the above excerpts.
-Include the relevant page reference.`,
-        },
-      ],
-    });
+Answer the question using ONLY the above book excerpts.
+
+For numerical questions:
+- Show the relevant calculation.
+- Give the final answer clearly.
+- Mention the page number.
+
+For definition questions:
+- Give the definition from the book.
+- Explain it briefly using the book's terminology.
+- Mention the page number.`,
+          },
+        ],
+      }
+    );
 
   // ---------------------------------------------------------
-  // 11. Get answer
+  // 12. Extract answer
   // ---------------------------------------------------------
 
   const answer =
-    completion.choices[0]?.message?.content ||
+    completion.choices[0]
+      ?.message?.content ||
     `I can only answer questions based on "${bookTitle}". I couldn't find sufficient information about this topic in the book.`;
 
   // ---------------------------------------------------------
-  // 12. Return references
+  // 13. Build sources
   // ---------------------------------------------------------
 
   const sources: Source[] =
-    selectedMatches.map((r) => ({
-      page: r.page_number,
-      chapter: r.chapter,
-      section: r.section,
-      similarity: Number(
-        r.vectorSimilarity ||
-          r.finalScore ||
-          0
-      ),
-      chunkId: r.id,
-    }));
+    selectedMatches.map(
+      (r) => ({
+        page:
+          r.page_number,
+        chapter:
+          r.chapter,
+        section:
+          r.section,
+        similarity:
+          Number(
+            r.vectorSimilarity ||
+              r.finalScore ||
+              0
+          ),
+        chunkId: r.id,
+      })
+    );
 
   // ---------------------------------------------------------
-  // 13. Return answer + debug information
+  // 14. Return answer
   // ---------------------------------------------------------
 
   return {
@@ -389,32 +466,6 @@ Include the relevant page reference.`,
     sources,
     refused: false,
     reason: null,
-
-    debug: {
-      question,
-      documentId,
-
-      vectorResults:
-        vectorMatches?.length || 0,
-
-      keywordResults:
-        keywordMatches?.length || 0,
-
-      rankedResults: ranked
-        .slice(0, 8)
-        .map((r) => ({
-          id: r.id,
-          page: r.page_number,
-          vectorSimilarity:
-            r.vectorSimilarity,
-          keywordScore:
-            r.keywordScore,
-          finalScore:
-            r.finalScore,
-          contentPreview: String(
-            r.content || ""
-          ).substring(0, 300),
-        })),
-    },
+    debug,
   };
 }
